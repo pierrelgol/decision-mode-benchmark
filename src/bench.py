@@ -84,6 +84,11 @@ def check(row, status, headers, payload, expected_status):
         if qid not in answers:
             problems.append(f"{qid}: no answer")
             continue
+        if answers[qid].get("skipped") is True:
+            predicted[qid] = "skipped"
+            if "ask_if" not in question:
+                problems.append(f"{qid}: skipped without ask_if")
+            continue
         predicted[qid] = check_answer(qid, question, answers[qid], body, problems)
         detail = answers[qid].get("details")
         if details and detail is None:
@@ -131,61 +136,60 @@ def summary(name, rows):
     return f"  {name:<28} {accepted:>4}/{len(rows):<4} {100 * accepted / len(rows):5.1f}%"
 
 
-parser = argparse.ArgumentParser(description="Send the sample to a /v1/systemone server and check every answer against the spec.")
-parser.add_argument("--name", required=True)
-parser.add_argument("--url", default="http://localhost:8000")
-parser.add_argument("-c", "--concurrency", type=int, default=8)
-parser.add_argument("--sample", type=Path, default=Path("sample.jsonl"))
-parser.add_argument("--out", type=Path, default=Path("runs"))
-parser.add_argument("--timeout", type=float, default=300.0)
-args = parser.parse_args()
+def fetch_health(base):
+    try:
+        health = json.loads(call(base + "/health", "GET", None, {}, 10)[2])
+    except Exception as error:
+        health = {}
+        print(f"no /health ({error!r}): thinking and image requests expect 200")
+    print(f"server {health.get('model')}  kind {health.get('kind')}  images {health.get('images')}")
+    return health
 
-base = args.url.rstrip("/")
-try:
-    health = json.loads(call(base + "/health", "GET", None, {}, 10)[2])
-except Exception as error:
-    health = {}
-    print(f"no /health ({error!r}): thinking and image requests expect 200")
-print(f"server {health.get('model')}  kind {health.get('kind')}  images {health.get('images')}")
 
-items = [json.loads(line) for line in args.sample.read_text().splitlines() if line.strip()]
-args.out.mkdir(parents=True, exist_ok=True)
-out_path = args.out / f"{args.name}.jsonl"
+def main():
+    parser = argparse.ArgumentParser(description="Send the DecisionPivot sample to a /v1/systemone server.")
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--url", default="http://localhost:8000")
+    parser.add_argument("-c", "--concurrency", type=int, default=8)
+    parser.add_argument("--sample", type=Path, default=Path("sample.jsonl"))
+    parser.add_argument("--out", type=Path, default=Path("runs"))
+    parser.add_argument("--timeout", type=float, default=300.0)
+    args = parser.parse_args()
 
-rows = []
-t0 = time.perf_counter()
-with ThreadPoolExecutor(args.concurrency) as pool, out_path.open("w") as out:
-    for future in as_completed([pool.submit(run, base, row, health, args.timeout, t0) for row in items]):
-        row = future.result()
-        rows.append(row)
-        out.write(json.dumps(row) + "\n")
-        accepted = 100 * sum(r["accepted"] for r in rows) / len(rows)
-        sys.stdout.write(f"\r[{len(rows):>4}/{len(items)}] accepted {accepted:5.1f}%  last {row['status']} {row['latency_ms']:8.1f} ms ")
-        sys.stdout.flush()
-wall = time.perf_counter() - t0
-print()
+    base = args.url.rstrip("/")
+    health = fetch_health(base)
+    items = [json.loads(line) for line in args.sample.read_text().splitlines() if line.strip()]
+    args.out.mkdir(parents=True, exist_ok=True)
+    out_path = args.out / f"{args.name}.jsonl"
 
-ok = [r for r in rows if r["ok"]]
-latencies = sorted(r["latency_ms"] for r in ok) or [0.0]
-by_family = defaultdict(list)
-for r in rows:
-    by_family[r["family"]].append(r)
-dataset = [r for r in rows if r["family"] != "feature"]
-features = by_family.get("feature", [])
+    rows = []
+    t0 = time.perf_counter()
+    with ThreadPoolExecutor(args.concurrency) as pool, out_path.open("w") as out:
+        for future in as_completed([pool.submit(run, base, row, health, args.timeout, t0) for row in items]):
+            row = future.result()
+            rows.append(row)
+            out.write(json.dumps(row) + "\n")
+            accepted = 100 * sum(r["accepted"] for r in rows) / len(rows)
+            sys.stdout.write(f"\r[{len(rows):>4}/{len(items)}] accepted {accepted:5.1f}%  last {row['status']} {row['latency_ms']:8.1f} ms ")
+            sys.stdout.flush()
+    wall = time.perf_counter() - t0
+    print()
 
-print(f"\n{args.name}  {base}  c={args.concurrency}")
-print(f"  requests   {len(rows)}  answered {len(ok)}  transport/5xx errors {len(rows) - len(ok)}")
-print(f"  throughput {len(ok) / wall:.2f} req/s  wall {wall:.1f} s")
-print(f"  latency    mean {statistics.fmean(latencies):.1f}  p50 {pct(latencies, 50):.1f}  p95 {pct(latencies, 95):.1f}  p99 {pct(latencies, 99):.1f} ms")
-for family, family_rows in sorted(by_family.items()):
-    if family != "feature":
+    ok = [r for r in rows if r["ok"]]
+    latencies = sorted(r["latency_ms"] for r in ok) or [0.0]
+    by_family = defaultdict(list)
+    for r in rows:
+        by_family[r["family"]].append(r)
+
+    print(f"\n{args.name}  {base}  c={args.concurrency}")
+    print(f"  requests   {len(rows)}  answered {len(ok)}  transport/5xx errors {len(rows) - len(ok)}")
+    print(f"  throughput {len(ok) / wall:.2f} req/s  wall {wall:.1f} s")
+    print(f"  latency    mean {statistics.fmean(latencies):.1f}  p50 {pct(latencies, 50):.1f}  p95 {pct(latencies, 95):.1f}  p99 {pct(latencies, 99):.1f} ms")
+    for family, family_rows in sorted(by_family.items()):
         print(summary(family, family_rows))
-if dataset:
-    print(summary("DecisionPivot", dataset))
-if features:
-    print(summary("spec features", features))
-for r in sorted(features, key=lambda r: r["id"]):
-    if not r["accepted"]:
-        print(f"    FAIL {r['id']}: {'; '.join(r['problems'])}")
-print(summary("total accepted", rows))
-print(f"  saved {out_path}")
+    print(summary("total accepted", rows))
+    print(f"  saved {out_path}")
+
+
+if __name__ == "__main__":
+    main()

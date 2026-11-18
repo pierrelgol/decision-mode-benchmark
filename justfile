@@ -14,3 +14,6 @@ compare *runs:
 
 plot *runs:
     uv run src/plot.py {{runs}}
+
+test:
+    uv run src/test.py --url {{url}}

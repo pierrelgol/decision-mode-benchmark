@@ -2,14 +2,17 @@
 
 Accuracy, latency and spec conformance of a `/v1/systemone` server (StartLux-Decision `docs/api.md`).
 
-The sample is every DecisionPivot task (core and reference tracks, choice and score questions) sampled evenly, each request
-sent exactly as published, plus `src/features.jsonl`: one hand-written request per feature of the spec (question types and
+`sample.jsonl` is every DecisionPivot task (core and reference tracks, choice and score questions) sampled evenly, each request
+sent exactly as published. `src/features.jsonl` is the conformance suite, run one by one by `src/test.py`: one hand-written request per feature of the spec (question types and
 criteria forms, JSON states, images, wide choices, `allow_none`, `none_check`, every control, details and thoughts,
-`/v1/decisions`, `/v1/models`, `/health`, `x-request-id`, and the 404/405/422 errors).
+`/v1/decisions`, `/v1/models`, `/health`, `x-request-id`, and the 404/405/422 errors), plus `ask_if` / `depends_on`
+as llmd implements them (a question whose `ask_if` does not hold answers `{"skipped": true}`; cycles, unknown ids and
+`ask_if` labels that are not options are 422).
 
 ```sh
 uv sync
 just sample 480             # src/sample.py  -> sample.jsonl
+just test                   # src/test.py    -> OK / KO per spec feature
 just bench my-run 8         # src/bench.py   -> runs/my-run.jsonl (name, concurrency)
 just compare                # src/compare.py -> table of every run in runs/
 just plot                   # src/plot.py    -> runs.png

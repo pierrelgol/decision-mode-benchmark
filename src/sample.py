@@ -5,7 +5,7 @@ from pathlib import Path
 
 from huggingface_hub import snapshot_download
 
-parser = argparse.ArgumentParser(description="Sample DecisionPivot evenly across every task, plus one request per spec feature.")
+parser = argparse.ArgumentParser(description="Sample DecisionPivot evenly across every task.")
 parser.add_argument("--size", type=int, default=480)
 parser.add_argument("--seed", type=int, default=20261117)
 parser.add_argument("--out", type=Path, default=Path("sample.jsonl"))
@@ -32,11 +32,9 @@ def gold(item):
     return max(item["soft"], key=item["soft"].get)
 
 
-features = Path(__file__).with_name("features.jsonl").read_text().splitlines()
 with args.out.open("w") as out:
     for item in sample:
         body = {"state": item["state"], "questions": item["questions"]}
         out.write(json.dumps({"id": item["id"], "family": item["id"].split(":")[0], "body": body, "gold": {"q": gold(item)}}) + "\n")
-    out.write("\n".join(features) + "\n")
 
-print(f"wrote {len(sample)} items from {len(pools)} tasks and {len(features)} feature requests to {args.out}")
+print(f"wrote {len(sample)} items from {len(pools)} tasks to {args.out}")
