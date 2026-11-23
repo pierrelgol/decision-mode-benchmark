@@ -1,6 +1,7 @@
 import argparse
 import json
 import statistics
+import subprocess
 import sys
 import time
 import urllib.error
@@ -8,6 +9,9 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+
+WARMUP_TIMEOUT_S = 1800
 
 
 def call(url, method, body, headers, timeout):
@@ -18,6 +22,28 @@ def call(url, method, body, headers, timeout):
             return response.status, dict(response.headers), response.read()
     except urllib.error.HTTPError as error:
         return error.code, dict(error.headers), error.read()
+
+
+def base_url(url):
+    return url.rstrip("/").removesuffix("/v1/systemone")
+
+
+def model_from(payload):
+    entries = payload.get("data") or payload.get("models") or []
+    names = [entry if isinstance(entry, str) else entry.get("id") or entry.get("name") for entry in entries]
+    if len(names) != 1:
+        raise SystemExit(f"/v1/models lists {names}: pick one with --model")
+    return names[0]
+
+
+def warmup(base, log_path):
+    script = Path(__file__).with_name("spec_tester.py")
+    try:
+        with log_path.open("w") as log:
+            code = subprocess.run([sys.executable, str(script), base], stdout=log, stderr=subprocess.STDOUT, timeout=WARMUP_TIMEOUT_S).returncode
+        print(f"warmup: spec tester exited {code}, log in {log_path}")
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"warmup: stopped ({error!r}), benchmarking anyway")
 
 
 def option_keys(question, kind):
@@ -122,9 +148,13 @@ def run(base, row, health, timeout, t0):
         predicted, problems = check(row, status, headers, payload, expected_status(row, health))
     except Exception as error:
         latency_ms, status, payload, predicted, problems = (time.perf_counter() - started) * 1000, 0, None, {}, [repr(error)]
+    gold = row.get("gold")
+    reply = payload if isinstance(payload, dict) else {}
     return {"id": row["id"], "family": row["family"], "ok": 0 < status < 500, "status": status, "accepted": not problems,
-            "problems": problems, "predicted": predicted, "gold": row.get("gold"), "latency_ms": latency_ms,
-            "finished_s": time.perf_counter() - t0, "response": payload}
+            "correct": bool(gold) and all(predicted.get(qid, "missing") == want for qid, want in gold.items()),
+            "problems": problems, "predicted": predicted, "gold": gold, "latency_ms": latency_ms,
+            "started_s": started - t0, "finished_s": time.perf_counter() - t0,
+            "answers": reply.get("answers"), "usage": reply.get("usage")}
 
 
 def pct(values, p):
@@ -132,13 +162,14 @@ def pct(values, p):
 
 
 def summary(name, rows):
-    accepted = sum(r["accepted"] for r in rows)
-    return f"  {name:<28} {accepted:>4}/{len(rows):<4} {100 * accepted / len(rows):5.1f}%"
+    correct = sum(r["correct"] for r in rows)
+    return f"  {name:<28} {correct:>4}/{len(rows):<4} {100 * correct / len(rows):5.1f}%"
 
 
 def fetch_health(base):
     try:
         health = json.loads(call(base + "/health", "GET", None, {}, 10)[2])
+        health = health if isinstance(health, dict) else {}
     except Exception as error:
         health = {}
         print(f"no /health ({error!r}): thinking and image requests expect 200")
@@ -150,27 +181,32 @@ def main():
     parser = argparse.ArgumentParser(description="Send the DecisionPivot sample to a /v1/systemone server.")
     parser.add_argument("--name", required=True)
     parser.add_argument("--url", default="http://localhost:8000")
+    parser.add_argument("--model", help="default: the only model in /v1/models")
     parser.add_argument("-c", "--concurrency", type=int, default=8)
     parser.add_argument("--sample", type=Path, default=Path("sample.jsonl"))
     parser.add_argument("--out", type=Path, default=Path("runs"))
     parser.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args()
 
-    base = args.url.rstrip("/")
+    base = base_url(args.url)
     health = fetch_health(base)
+    model = args.model or model_from(json.loads(call(base + "/v1/models", "GET", None, {}, 10)[2]))
     items = [json.loads(line) for line in args.sample.read_text().splitlines() if line.strip()]
+    for item in items:
+        item["body"].setdefault("model", model)
     args.out.mkdir(parents=True, exist_ok=True)
     out_path = args.out / f"{args.name}.jsonl"
+    warmup(base, args.out / f"{args.name}.warmup.log")
 
     rows = []
     t0 = time.perf_counter()
     with ThreadPoolExecutor(args.concurrency) as pool, out_path.open("w") as out:
         for future in as_completed([pool.submit(run, base, row, health, args.timeout, t0) for row in items]):
-            row = future.result()
+            row = {"run": args.name, "model": model, "concurrency": args.concurrency, **future.result()}
             rows.append(row)
             out.write(json.dumps(row) + "\n")
-            accepted = 100 * sum(r["accepted"] for r in rows) / len(rows)
-            sys.stdout.write(f"\r[{len(rows):>4}/{len(items)}] accepted {accepted:5.1f}%  last {row['status']} {row['latency_ms']:8.1f} ms ")
+            correct = 100 * sum(r["correct"] for r in rows) / len(rows)
+            sys.stdout.write(f"\r[{len(rows):>4}/{len(items)}] correct {correct:5.1f}%  last {row['status']} {row['latency_ms']:8.1f} ms ")
             sys.stdout.flush()
     wall = time.perf_counter() - t0
     print()
@@ -181,13 +217,14 @@ def main():
     for r in rows:
         by_family[r["family"]].append(r)
 
-    print(f"\n{args.name}  {base}  c={args.concurrency}")
+    print(f"\n{args.name}  {base}  model {model}  c={args.concurrency}")
     print(f"  requests   {len(rows)}  answered {len(ok)}  transport/5xx errors {len(rows) - len(ok)}")
     print(f"  throughput {len(ok) / wall:.2f} req/s  wall {wall:.1f} s")
     print(f"  latency    mean {statistics.fmean(latencies):.1f}  p50 {pct(latencies, 50):.1f}  p95 {pct(latencies, 95):.1f}  p99 {pct(latencies, 99):.1f} ms")
     for family, family_rows in sorted(by_family.items()):
         print(summary(family, family_rows))
-    print(summary("total accepted", rows))
+    print(summary("total correct", rows))
+    print(f"  spec + gold accepted {sum(r['accepted'] for r in rows)}/{len(rows)}")
     print(f"  saved {out_path}")
 
 

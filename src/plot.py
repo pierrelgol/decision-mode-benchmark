@@ -19,14 +19,14 @@ parser.add_argument("runs", type=Path, nargs="*")
 parser.add_argument("--out", type=Path, default=Path("runs.png"))
 args = parser.parse_args()
 
-paths = args.runs or sorted(Path("runs").glob("*.jsonl"))
+paths = [p for p in args.runs or sorted(Path("runs").glob("*.jsonl")) if p.stat().st_size]
 assert paths, "no runs found"
-names, panels = [], {"accepted %": [], "throughput req/s": [], "latency p50 ms": [], "latency p95 ms": []}
+names, panels = [], {"correct %": [], "throughput req/s": [], "latency p50 ms": [], "latency p95 ms": []}
 for path in paths:
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     latencies = sorted(r["latency_ms"] for r in rows if r["ok"]) or [0.0]
     names.append(path.stem)
-    panels["accepted %"].append(100 * sum(r["accepted"] for r in rows) / len(rows))
+    panels["correct %"].append(100 * sum(r["correct"] for r in rows) / len(rows))
     panels["throughput req/s"].append(sum(r["ok"] for r in rows) / max(r["finished_s"] for r in rows))
     panels["latency p50 ms"].append(pct(latencies, 50))
     panels["latency p95 ms"].append(pct(latencies, 95))

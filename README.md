@@ -11,14 +11,26 @@ as llmd implements them (a question whose `ask_if` does not hold answers `{"skip
 
 ```sh
 uv sync
-just sample 480             # src/sample.py  -> sample.jsonl
-just test                   # src/test.py    -> OK / KO per spec feature
-just bench my-run 8         # src/bench.py   -> runs/my-run.jsonl (name, concurrency)
+just sample                 # src/sample.py  -> sample.jsonl (1024 requests)
+just test                   # src/spec_tester.py -> OK / KO per spec feature
+just bench my-run 8         # src/bench.py   -> spec tester warmup, then runs/my-run.jsonl
 just compare                # src/compare.py -> table of every run in runs/
 just plot                   # src/plot.py    -> runs.png
 ```
 
-Set the server with `just url=http://host:port bench ...`.
+Set the server with `just url=http://host:port bench ...`. Only `uv` and `just` are needed on the machine.
+
+To compare llmd and vLLM, serve the same model with each, then run the same sample against both:
+
+```sh
+just url=http://localhost:8000 bench llmd 8
+just url=http://localhost:8001 bench vllm 8   # vllm serve MODEL --logprobs-mode raw_logprobs
+just compare && just plot
+```
+
+Each line of `runs/<name>.jsonl` is one request: `run`, `model`, `concurrency`, `id`, `family`, `status`, `ok`, `correct`,
+`accepted`, `problems`, `predicted`, `gold`, `latency_ms`, `started_s`, `finished_s`, `answers` (with probabilities) and `usage`.
+Warmup requests are not in it, their output is in `runs/<name>.warmup.log`.
 
 A response is accepted when it has the expected status, every answer has the shape the spec gives for its type, and the
 answer matches the gold one: the `choice` for a choice question (null when the gold is "none of the above"), the most
